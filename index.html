@@ -221,75 +221,140 @@ const CL=['#aa0000','#0f3460','#16213e','#533483','#2ec4b6','#ff6b6b','#4ecdc4',
 let charts=[], currentResult=null, allMedia=[], checkedIds=new Set();
 let sortCol='relevance', sortAsc=false;
 
-// Gender/age keywords for demographic targeting detection
-const GENDER_KW={male:['male','men','man','boy','gentleman','男性','メンズ','pria','laki','ผู้ชาย','nam gioi','男'],female:['female','women','woman','girl','lady','女性','レディース','wanita','perempuan','ผู้หญิง','nu gioi','女']};
-const AGE_KW={'13-17':['teen','teenager','adolescent','10代','ティーン','remaja','วัยรุ่น','thanh thieu nien'],'18-24':['young adult','college','university','gen z','20代','大学生','若者','mahasiswa','วัยเรียน','sinh vien'],'25-34':['millennial','young professional','30代','ミレニアル','milenial','คนรุ่นใหม่'],'35-44':['middle age','family','parent','40代','中年','keluarga','ครอบครัว'],'45-54':['mature','senior','50代','シニア'],'55+':['elderly','retired','高齢','シルバー','年配','定年']};
 
-function analyzeBrief(brief){
-  const l=brief.toLowerCase(); const s={};
-  Object.entries(CKW).forEach(([c,kws])=>{ let sc=0; kws.forEach(k=>{if(l.includes(k.toLowerCase()))sc++;}); if(sc>0)s[c]=sc; });
-  if(!Object.keys(s).length){s['General Lifestyle']=1;s['Mainstream News']=1;}
-  // Detect target gender
+// Gender/age keywords for demographic targeting detection
+// Gemini AI-powered brief analysis
+const geminiApiKey='AIzaSyBiTarlPzdSfTGRop7xWYnjVfQERzSbKaQ';
+
+const AVAILABLE_CATEGORIES=Object.keys(CKW);
+
+async function analyzeBriefAI(brief,country){
+  const prompt=`You are an ad network media planning expert. Analyze this campaign brief and return a JSON object.
+
+Campaign brief: "${brief}"
+Target country: ${country}
+
+Available media categories: ${AVAILABLE_CATEGORIES.join(', ')}
+
+Return ONLY valid JSON (no markdown, no code blocks) with this exact structure:
+{
+  "categories": {"CategoryName": relevance_score, ...},
+  "targetGender": {"male": weight} or {"female": weight} or {} if not specified,
+  "targetAge": {"18-24": weight, ...} or {} if not specified,
+  "reasoning": "brief explanation in English"
+}
+
+Rules:
+- categories: pick 1-5 most relevant categories from the available list. Score 1-3 (3=perfect match).
+- targetGender: only include if the brief implies a gender target. weight 1-3.
+- targetAge: use groups 13-17, 18-24, 25-34, 35-44, 45-54, 55+. weight 1-3. Infer from context (e.g. "university students"→18-24, "mothers"→25-34).
+- Think about WHO would be interested in this product/service, not just literal keywords.
+- The brief can be in ANY language. Understand the intent regardless of language.`;
+
+  const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      contents:[{parts:[{text:prompt}]}],
+      generationConfig:{temperature:0.1,maxOutputTokens:500}
+    })
+  });
+  if(!res.ok) throw new Error('Gemini API error: '+res.status);
+  const data=await res.json();
+  const text=data.candidates?.[0]?.content?.parts?.[0]?.text||'';
+  // Parse JSON from response (strip markdown code blocks if any)
+  const cleaned=text.replace(/```json\s*/g,'').replace(/```\s*/g,'').trim();
+  return JSON.parse(cleaned);
+}
+
+// Fallback: simple keyword-based analysis (used when no API key)
+function analyzeBriefLocal(brief){
+  const l=brief.toLowerCase();
+  function wordMatch(text,kw){
+    const e=kw.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+    if(/[\u3000-\u9fff\u0e00-\u0e7f\u1100-\u11ff\uac00-\ud7af]/.test(kw))return new RegExp(e,'i').test(text);
+    return new RegExp('(?:^|[\\s,;.!?()\\-/])'+e+'(?:$|[\\s,;.!?()\\-/])','i').test(text);
+  }
+  const s={};
+  Object.entries(CKW).forEach(([c,kws])=>{let sc=0;kws.forEach(k=>{if(wordMatch(l,k.toLowerCase()))sc++;});if(sc>0)s[c]=sc;});
+  if(!Object.keys(s).length)s['General Lifestyle']=1;
   const tg={};
-  Object.entries(GENDER_KW).forEach(([g,kws])=>{kws.forEach(k=>{if(l.includes(k))tg[g]=(tg[g]||0)+1;});});
-  // Detect target age groups
+  const femaleKW=['female','females','women','woman','girl','girls','lady','女性','レディース','wanita','perempuan','ผู้หญิง','nu gioi','phu nu','女生'];
+  const maleKW=['male','males','men','man','boy','boys','gentleman','男性','メンズ','pria','laki-laki','ผู้ชาย','nam gioi','男生'];
+  femaleKW.forEach(k=>{if(wordMatch(l,k))tg.female=(tg.female||0)+1;});
+  maleKW.forEach(k=>{if(wordMatch(l,k))tg.male=(tg.male||0)+1;});
   const ta={};
-  Object.entries(AGE_KW).forEach(([a,kws])=>{kws.forEach(k=>{if(l.includes(k))ta[a]=(ta[a]||0)+1;});});
+  // Numeric age parsing
+  const agePatterns=[[/(\d{1,2})\s*(?:years?\s*old|yo\b)/gi],[/age[ds]?\s*(\d{1,2})/gi],[/(\d{1,2})\s*(?:歳|才|살|tuoi|ปี|tahun)/gi]];
+  const ages=new Set();
+  agePatterns.flat().forEach(p=>{let m;while((m=p.exec(l))!==null)ages.add(parseInt(m[1]));});
+  let m;const dJP=/(\d{1,2})代/g;while((m=dJP.exec(l))!==null){const d=parseInt(m[1]);for(let i=d;i<d+10;i++)ages.add(i);}
+  const rp=[/(\d{1,2})\s*[-~–—]\s*(\d{1,2})/gi,/(\d{1,2})\s*(?:to|から|sampai|ถึง|至)\s*(\d{1,2})/gi];
+  rp.forEach(p=>{let m;while((m=p.exec(l))!==null){for(let i=parseInt(m[1]);i<=parseInt(m[2]);i++)ages.add(i);}});
+  ages.forEach(a=>{let g;if(a>=13&&a<=17)g='13-17';else if(a>=18&&a<=24)g='18-24';else if(a>=25&&a<=34)g='25-34';else if(a>=35&&a<=44)g='35-44';else if(a>=45&&a<=54)g='45-54';else if(a>=55)g='55+';if(g)ta[g]=(ta[g]||0)+1;});
   return {categories:s,targetGender:tg,targetAge:ta};
 }
 
-function generatePlan(){
+async function generatePlan(){
   const country=document.getElementById('countrySelect').value;
   const brief=document.getElementById('briefInput').value.trim();
   if(!brief){alert('Please enter a campaign brief.');return;}
   document.getElementById('loading').style.display='flex';
-  setTimeout(()=>{
+  try{
     const meta=COUNTRY_META[country];
     const cfg=COUNTRY_CONFIG[country]||{};
     meta.baseline=cfg.baseline;
     P=COUNTRY_CATEGORIES[country]||{};
-    // Override media categories from shared COUNTRY_MEDIA_DB
     const catOverrides=COUNTRY_MEDIA_DB[country]||{};
     const raw=(MEDIA_DB[country]||[]).map(m=>{
       const override=catOverrides[m.i];
       return override?{...m,c:override}:m;
     });
-    const analysis=analyzeBrief(brief);
-    const scores=analysis.categories;
-    const tGender=analysis.targetGender;
-    const tAge=analysis.targetAge;
+    // Analyze brief: AI (Gemini) or local fallback
+    let analysis,aiUsed=false;
+    if(geminiApiKey){
+      try{analysis=await analyzeBriefAI(brief,country);aiUsed=true;}
+      catch(e){console.warn('Gemini API failed, using local:',e);analysis=analyzeBriefLocal(brief);}
+    }else{analysis=analyzeBriefLocal(brief);}
+    const scores=analysis.categories||{};
+    const tGender=analysis.targetGender||{};
+    const tAge=analysis.targetAge||{};
+    const reasoning=analysis.reasoning||'';
     const platforms=[...document.querySelectorAll('.plat-check:checked')].map(c=>c.value);
     const catDiv=document.getElementById('detectedCategories');
     let detectedHtml='<strong>Detected categories:</strong> '+Object.entries(scores).sort((a,b)=>b[1]-a[1]).map(([c,s])=>`<span class="cat-tag${s>=2?' high':''}">${c} (${s})</span>`).join('');
     if(Object.keys(tGender).length) detectedHtml+='<br><strong>Target gender:</strong> '+Object.keys(tGender).map(g=>`<span class="cat-tag">${g}</span>`).join('');
     if(Object.keys(tAge).length) detectedHtml+='<br><strong>Target age:</strong> '+Object.keys(tAge).map(a=>`<span class="cat-tag">${a}</span>`).join('');
+    if(reasoning) detectedHtml+='<br><span style="font-size:11px;color:#999"><strong>AI reasoning:</strong> '+reasoning+'</span>';
+    if(aiUsed) detectedHtml+='<br><span style="font-size:10px;color:#2ec4b6">&#9679; Powered by Gemini AI</span>';
     catDiv.innerHTML=detectedHtml;
     let filtered=raw.filter(m=>platforms.includes(m.f));
     const matchedCats=Object.keys(scores);
     const defaultProfile={male:50,female:50,age:{'13-17':8,'18-24':22,'25-34':28,'35-44':20,'45-54':13,'55+':9},income:{'Lower 50%':25,'11-20%':16,'21-30%':16,'31-40%':16,'41-50%':15,'Top 10%':12},household:{'1-2':15,'3-4':35,'5-6':32,'7+':18},marital:{Single:38,Married:48,Separated:14},children:{Yes:50,No:50}};
+    const hasGenderTarget=Object.keys(tGender).length>0;
+    const hasAgeTarget=Object.keys(tAge).length>0;
+    const hasDemoTarget=hasGenderTarget||hasAgeTarget;
     allMedia=filtered.map(m=>{
       const catScore=scores[m.c]||0;
       const profile=P[m.c]||P['General Lifestyle']||defaultProfile;
-      // Demographic fit score: bonus for matching target gender/age
-      let demoScore=0;
-      if(tGender.male) demoScore+=profile.male/100;
-      if(tGender.female) demoScore+=profile.female/100;
-      if(Object.keys(tAge).length){
-        const ageSum=Object.keys(tAge).reduce((s,a)=>s+(profile.age[a]||0),0);
-        demoScore+=ageSum/100;
+      let genderFit=50,ageFit=50;
+      if(hasGenderTarget){
+        const gKeys=Object.keys(tGender);
+        if(gKeys.length===1&&gKeys[0]==='female') genderFit=profile.female;
+        else if(gKeys.length===1&&gKeys[0]==='male') genderFit=profile.male;
+        else genderFit=(profile.male+profile.female)/2;
       }
-      const relevance=catScore + demoScore;
-      return {...m,relevance,profile};
+      if(hasAgeTarget){ageFit=Object.keys(tAge).reduce((s,a)=>s+(profile.age[a]||0),0);}
+      const demoScore=hasDemoTarget?((hasGenderTarget?genderFit/50:1)+(hasAgeTarget?ageFit/25:1)):0;
+      const relevance=catScore+demoScore;
+      return {...m,relevance,genderFit,ageFit,profile};
     }).sort((a,b)=>b.relevance-a.relevance||a.n.localeCompare(b.n));
-    
-    // Pre-check: primary media checked, secondary unchecked
     checkedIds=new Set();
     allMedia.forEach(m=>{if(m.relevance>0)checkedIds.add(m.i);});
-    
     currentResult={country,meta,brief,scores,matchedCats};
     renderAll();
-    document.getElementById('loading').style.display='none';
-  },200);
+  }catch(e){console.error('generatePlan error:',e);alert('Error: '+e.message);}
+  finally{document.getElementById('loading').style.display='none';}
 }
 
 function renderAll(){
