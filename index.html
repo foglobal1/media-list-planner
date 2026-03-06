@@ -55,7 +55,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .table-subtitle{font-size:12px;color:#888;margin-bottom:16px}
 .table-actions{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center}
 table{width:100%;border-collapse:collapse;font-size:12px}
-th{background:#f8f9fa;padding:8px 10px;text-align:left;font-weight:600;color:#555;border-bottom:2px solid #e9ecef;white-space:nowrap;user-select:none;position:sticky;top:0;z-index:1}
+th{background:#f8f9fa;padding:8px 10px;text-align:left;font-weight:600;color:#555;border-bottom:2px solid #e9ecef;white-space:nowrap;user-select:none;position:sticky;top:0;z-index:1;cursor:pointer}
+th:hover{background:#e9ecef}
+th .sa{margin-left:3px;font-size:9px;color:#aaa}
+th.age-col{font-size:10px;padding:8px 6px;min-width:50px}
 td{padding:7px 10px;border-bottom:1px solid #f0f0f0}
 tr:hover td{background:#f0f7ff}
 tr.unchecked td{opacity:.45}
@@ -246,6 +249,7 @@ const CH=['Yes','No'];
 const CL=['#aa0000','#0f3460','#16213e','#533483','#2ec4b6','#ff6b6b','#4ecdc4','#45b7d1','#96ceb4','#ffa502','#dda0dd','#ff7675','#74b9ff','#a29bfe','#fd79a8','#00cec9','#6c5ce7','#e17055','#81ecec'];
 
 let charts=[], currentResult=null, allMedia=[], checkedIds=new Set();
+let sortCol='relevance', sortAsc=false;
 
 function analyzeBrief(brief){
   const l=brief.toLowerCase(); const s={};
@@ -299,7 +303,30 @@ function getFilteredMedia(){
   if(search)f=f.filter(m=>m.n.toLowerCase().includes(search)||m.p.toLowerCase().includes(search));
   if(cat)f=f.filter(m=>m.c===cat);
   if(plat)f=f.filter(m=>m.f===plat);
-  return f;
+  // Sort
+  const sorted=[...f].sort((a,b)=>{
+    let va,vb;
+    const pa=a.profile,pb=b.profile;
+    if(sortCol==='name'){va=a.n.toLowerCase();vb=b.n.toLowerCase();}
+    else if(sortCol==='partner'){va=a.p.toLowerCase();vb=b.p.toLowerCase();}
+    else if(sortCol==='category'){va=a.c;vb=b.c;}
+    else if(sortCol==='platform'){va=a.f;vb=b.f;}
+    else if(sortCol==='male'){va=pa.male;vb=pb.male;}
+    else if(sortCol==='female'){va=pa.female;vb=pb.female;}
+    else if(sortCol==='relevance'){va=a.relevance;vb=b.relevance;}
+    else if(sortCol==='id'){va=a.i;vb=b.i;}
+    else if(AG.includes(sortCol)){va=pa.age[sortCol];vb=pb.age[sortCol];}
+    else{va=0;vb=0;}
+    if(typeof va==='string') return sortAsc?va.localeCompare(vb):vb.localeCompare(va);
+    return sortAsc?va-vb:vb-va;
+  });
+  return sorted;
+}
+
+function doSort(col){
+  if(sortCol===col)sortAsc=!sortAsc;
+  else{sortCol=col;sortAsc=(col==='name'||col==='partner'||col==='category'||col==='platform');}
+  renderTable(getFilteredMedia());
 }
 
 function renderTable(media){
@@ -313,11 +340,20 @@ function renderTable(media){
   const curPlat=fPlat.value;
   fPlat.innerHTML='<option value="">All Platforms</option>'+plats.map(p=>'<option value="'+p+'"'+(p===curPlat?' selected':'')+'>'+p+'</option>').join('');
   
-  document.getElementById('tableHead').innerHTML='<th><input type="checkbox" id="checkAll" onchange="toggleAllVisible(this.checked)"></th><th>#</th><th>Media ID</th><th>Media Name</th><th>Media Partner</th><th>Category</th><th>Platform</th><th>Male%</th><th>Female%</th><th>Top Age</th><th>Relevance</th>';
+  const sa=c=>sortCol===c?(sortAsc?' &#9650;':' &#9660;'):'';
+  const sh=(label,col,cls)=>`<th class="${cls||''}" onclick="doSort('${col}')">${label}<span class="sa">${sa(col)}</span></th>`;
+  document.getElementById('tableHead').innerHTML=
+    '<th style="cursor:default"><input type="checkbox" id="checkAll" onchange="toggleAllVisible(this.checked)"></th>'+
+    '<th style="cursor:default">#</th>'+
+    sh('ID','id','text-right')+sh('Media Name','name','')+sh('Media Partner','partner','')+
+    sh('Category','category','')+sh('Platform','platform','')+
+    sh('Male%','male','text-right')+sh('Female%','female','text-right')+
+    AG.map(g=>sh(g,g,'text-right age-col')).join('')+
+    sh('Relevance','relevance','text-right');
   document.getElementById('tableBody').innerHTML=media.map((m,i)=>{
     const p=m.profile;
-    const topAge=AG.reduce((a,b)=>p.age[a]>p.age[b]?a:b);
     const checked=checkedIds.has(m.i);
+    const topAgeG=AG.reduce((a,b)=>p.age[a]>p.age[b]?a:b);
     return `<tr class="${checked?'':'unchecked'}" data-id="${m.i}">
       <td><input type="checkbox" ${checked?'checked':''} onchange="toggleMedia(${m.i},this.checked)"></td>
       <td class="text-right" style="color:#aaa;font-size:11px">${i+1}</td>
@@ -328,7 +364,7 @@ function renderTable(media){
       <td><span class="platform-badge">${m.f}</span></td>
       <td class="text-right">${p.male}%</td>
       <td class="text-right">${p.female}%</td>
-      <td>${topAge}</td>
+      ${AG.map(g=>`<td class="text-right" style="font-size:11px;${g===topAgeG?'font-weight:700;color:#aa0000':''}">${p.age[g]}%</td>`).join('')}
       <td class="text-right" style="font-weight:600;color:${m.relevance>0?'#2e7d32':'#ccc'}">${m.relevance>0?m.relevance.toFixed(1):'-'}</td>
     </tr>`;
   }).join('');
@@ -429,9 +465,9 @@ function mkCard(t){const d=document.createElement('div');d.className='chart-card
 
 function downloadCSV(){
   if(!currentResult)return;const r=currentResult;const sel=r.selMedia||[];
-  const rows=[['#','Media ID','Media Name','Media Partner','Category','Platform','URL','Male%','Female%','Top Age','Relevance','Selected']];
-  allMedia.forEach((m,i)=>{const p=m.profile;const ta=AG.reduce((a,b)=>p.age[a]>p.age[b]?a:b);const ck=checkedIds.has(m.i)?'Yes':'No';
-    rows.push([i+1,m.i,`"${m.n}"`,`"${m.p}"`,m.c,m.f,m.u||'',p.male,p.female,ta+' ('+p.age[ta]+'%)',m.relevance>0?m.relevance.toFixed(1):'-',ck]);});
+  const rows=[['#','Media ID','Media Name','Media Partner','Category','Platform','URL','Male%','Female%',...AG.map(g=>'Age '+g+' %'),'Relevance','Selected']];
+  allMedia.forEach((m,i)=>{const p=m.profile;const ck=checkedIds.has(m.i)?'Yes':'No';
+    rows.push([i+1,m.i,`"${m.n}"`,`"${m.p}"`,m.c,m.f,m.u||'',p.male,p.female,...AG.map(g=>p.age[g]),m.relevance>0?m.relevance.toFixed(1):'-',ck]);});
   rows.push([]);rows.push(['=== Audience Insight (Selected Media Only) ===']);
   rows.push(['Country',r.country]);rows.push(['Selected Media',sel.length]);rows.push(['Est. Reachable Audience',r.uniqueReach]);rows.push(['Reach %',r.reachPct.toFixed(1)+'%']);
   rows.push([]);rows.push(['Gender','Male',r.w.male.toFixed(1)+'%','Female',r.w.female.toFixed(1)+'%']);
@@ -445,9 +481,9 @@ function downloadCSV(){
 
 function downloadCSVJP(){
   if(!currentResult)return;const r=currentResult;const sel=r.selMedia||[];
-  const rows=[['#','メディアID','メディア名','メディアパートナー','カテゴリ','プラットフォーム','URL','男性%','女性%','最多年齢層','関連度','選択']];
-  allMedia.forEach((m,i)=>{const p=m.profile;const ta=AG.reduce((a,b)=>p.age[a]>p.age[b]?a:b);const ck=checkedIds.has(m.i)?'Yes':'No';
-    rows.push([i+1,m.i,`"${m.n}"`,`"${m.p}"`,m.c,m.f,m.u||'',p.male,p.female,ta+' ('+p.age[ta]+'%)',m.relevance>0?m.relevance.toFixed(1):'-',ck]);});
+  const rows=[['#','メディアID','メディア名','メディアパートナー','カテゴリ','プラットフォーム','URL','男性%','女性%',...AG.map(g=>g+'歳 %'),'関連度','選択']];
+  allMedia.forEach((m,i)=>{const p=m.profile;const ck=checkedIds.has(m.i)?'Yes':'No';
+    rows.push([i+1,m.i,`"${m.n}"`,`"${m.p}"`,m.c,m.f,m.u||'',p.male,p.female,...AG.map(g=>p.age[g]),m.relevance>0?m.relevance.toFixed(1):'-',ck]);});
   rows.push([]);rows.push(['=== オーディエンスインサイト（選択メディアのみ） ===']);
   rows.push(['国',r.country]);rows.push(['選択メディア数',sel.length]);rows.push(['推定リーチ可能オーディエンス',r.uniqueReach]);rows.push(['人口リーチ率',r.reachPct.toFixed(1)+'%']);
   rows.push([]);rows.push(['性別','男性',r.w.male.toFixed(1)+'%','女性',r.w.female.toFixed(1)+'%']);
