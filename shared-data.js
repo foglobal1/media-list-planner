@@ -1,6 +1,7 @@
 // Shared demographic data - Single source of truth
 // Updated in: audience_insight_report repo
 // Consumed by: audience_insight_report, media-list-planner
+// Last synced: 2026-03-06
 
 const COUNTRY_CATEGORIES = {
   'Indonesia': {
