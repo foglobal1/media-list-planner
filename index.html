@@ -489,7 +489,13 @@ async function generatePlan(){
       const onTargetPct=OTR_PCT[m.onTargetLabel];
       const relevance=m.compositeScore;
       return {...m,relevance,onTargetPct};
-    }).sort((a,b)=>{const o={High:0,Middle:1,Low:2};return (o[a.onTargetLabel]-o[b.onTargetLabel])||b.relevance-a.relevance||a.n.localeCompare(b.n);});
+    }).sort((a,b)=>{
+      const o={High:0,Middle:1,Low:2};
+      const tierDiff=o[a.onTargetLabel]-o[b.onTargetLabel];if(tierDiff)return tierDiff;
+      // Within same tier: SimilarWeb first, then by traffic desc
+      const srcDiff=(a.demoSrc==='SimilarWeb'?0:1)-(b.demoSrc==='SimilarWeb'?0:1);if(srcDiff)return srcDiff;
+      return b.mvRaw-a.mvRaw||a.n.localeCompare(b.n);
+    });
     checkedIds=new Set();
     allMedia.forEach(m=>{if(m.onTargetLabel==='High'||m.onTargetLabel==='Middle')checkedIds.add(m.i);});
     currentResult={country,meta,brief,scores,matchedCats};
@@ -640,22 +646,28 @@ function updateInsights(){
   });
   Object.keys(w).forEach(k=>w[k]/=n);
   
-  // Reach calculation: monthly visits → unique users (visits/ppv as proxy for unique)
-  // Then apply diminishing overlap as more media are added
-  const totalUniqueEst=sel.reduce((s,m)=>{
-    const si=m.si;
-    const ppv=si&&si.ppv>1?si.ppv:1.5; // pages per visit as session proxy
-    return s+m.mvRaw/ppv; // approximate unique visitors
-  },0);
-  // Logarithmic overlap: more media = more audience overlap
-  const overlapFactor=sel.length<=1?1:Math.min(1,3/Math.log10(sel.length+1));
-  const uniqueReach=Math.min(Math.round(totalUniqueEst*overlapFactor),meta.population);
-  const reachPct=(uniqueReach/meta.population*100);
-  // On-Target: weight each media's unique reach by its on-target %
-  const onTargetReach=Math.min(Math.round(sel.reduce((s,m)=>{
+  // Reach calculation: incremental unique reach with diminishing returns
+  // Sort by traffic desc, add each media's marginal contribution
+  const selSorted=[...sel].sort((a,b)=>b.mvRaw-a.mvRaw);
+  let cumReach=0;
+  selSorted.forEach(m=>{
     const ppv=m.si&&m.si.ppv>1?m.si.ppv:1.5;
-    return s+m.mvRaw/ppv*m.onTargetPct/100;
-  },0)*overlapFactor),uniqueReach);
+    const uv=m.mvRaw/ppv; // estimated unique visitors
+    // Each additional media has diminishing marginal reach (audience overlap increases)
+    const marginal=uv*Math.max(0.05,1-cumReach/meta.population);
+    cumReach+=marginal;
+  });
+  const uniqueReach=Math.min(Math.round(cumReach),meta.population);
+  const reachPct=(uniqueReach/meta.population*100);
+  // On-Target: same incremental approach weighted by on-target %
+  let cumOTReach=0;
+  selSorted.forEach(m=>{
+    const ppv=m.si&&m.si.ppv>1?m.si.ppv:1.5;
+    const uv=m.mvRaw/ppv*m.onTargetPct/100;
+    const marginal=uv*Math.max(0.05,1-cumOTReach/(meta.population*0.5));
+    cumOTReach+=marginal;
+  });
+  const onTargetReach=Math.min(Math.round(cumOTReach),uniqueReach);
   
   // Update selection bar
   document.getElementById('selCount').textContent=sel.length;
