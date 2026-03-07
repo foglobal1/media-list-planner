@@ -616,13 +616,22 @@ function updateInsights(){
   });
   Object.keys(w).forEach(k=>w[k]/=n);
   
-  // Reach calculation: sum of monthly visits (with overlap discount), cap at population
-  const totalMV=sel.reduce((s,m)=>s+m.mvRaw,0);
-  const overlapFactor=Math.max(0.4,1-sel.length*0.005); // diminishing returns for overlap
-  const uniqueReach=Math.min(Math.round(totalMV*overlapFactor),meta.population);
+  // Reach calculation: monthly visits → unique users (visits/ppv as proxy for unique)
+  // Then apply diminishing overlap as more media are added
+  const totalUniqueEst=sel.reduce((s,m)=>{
+    const si=m.si;
+    const ppv=si&&si.ppv>1?si.ppv:1.5; // pages per visit as session proxy
+    return s+m.mvRaw/ppv; // approximate unique visitors
+  },0);
+  // Logarithmic overlap: more media = more audience overlap
+  const overlapFactor=sel.length<=1?1:Math.min(1,3/Math.log10(sel.length+1));
+  const uniqueReach=Math.min(Math.round(totalUniqueEst*overlapFactor),meta.population);
   const reachPct=(uniqueReach/meta.population*100);
-  // On-Target: weight each media's reach by its on-target %
-  const onTargetReach=Math.min(Math.round(sel.reduce((s,m)=>s+m.mvRaw*m.onTargetPct/100,0)*overlapFactor),uniqueReach);
+  // On-Target: weight each media's unique reach by its on-target %
+  const onTargetReach=Math.min(Math.round(sel.reduce((s,m)=>{
+    const ppv=m.si&&m.si.ppv>1?m.si.ppv:1.5;
+    return s+m.mvRaw/ppv*m.onTargetPct/100;
+  },0)*overlapFactor),uniqueReach);
   
   // Update selection bar
   document.getElementById('selCount').textContent=sel.length;
