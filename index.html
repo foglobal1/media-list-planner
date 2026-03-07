@@ -295,20 +295,28 @@ Rules:
   return JSON.parse(cleaned);
 }
 
-async function labelMediaAI(brief,country,mediaList){
+async function labelMediaAI(brief,country,mediaList,analysis){
   // Split into batches of 150 to stay within token limits
   const BATCH=150;
   const results={};
+  const targetCats=Object.entries(analysis.categories||{}).sort((a,b)=>b[1]-a[1]).map(([c,s])=>`${c}(score:${s})`).join(', ');
+  const targetGender=Object.keys(analysis.targetGender||{}).join(',')||'any';
+  const targetAge=Object.keys(analysis.targetAge||{}).join(',')||'any';
   for(let i=0;i<mediaList.length;i+=BATCH){
     const batch=mediaList.slice(i,i+BATCH);
     const mediaJson=batch.map(m=>{
       const si=typeof MEDIA_SITE_INFO!=='undefined'&&MEDIA_SITE_INFO[m.i]||null;
-      return {id:m.i,name:m.n,category:m.c,description:si?.d||'',monthly_visits:si?.mv?(si.mv+(si.mvu||'')):null};
+      const sw=typeof MEDIA_DEMOGRAPHICS!=='undefined'&&MEDIA_DEMOGRAPHICS[m.i]||null;
+      const demo=sw?`male:${sw.male}%,female:${sw.female}%,top_age:${Object.entries(sw.age).sort((a,b)=>b[1]-a[1])[0][0]}`:'';
+      return {id:m.i,name:m.n,category:m.c,description:si?.d||'',demographics:demo};
     });
-    const prompt=`You are an expert ad network media planner. Given a campaign brief and a list of media, rate each media's relevance to the campaign's target audience.
+    const prompt=`You are an expert ad network media planner. Rate each media's on-target ratio for this campaign.
 
 Campaign brief: "${brief}"
 Country: ${country}
+Target categories: ${targetCats}
+Target gender: ${targetGender}
+Target age: ${targetAge}
 
 Media list:
 ${JSON.stringify(mediaJson)}
@@ -316,16 +324,17 @@ ${JSON.stringify(mediaJson)}
 Return ONLY valid JSON (no markdown, no code blocks). Format:
 {"ratings":{"<media_id>":"High"|"Middle"|"Low", ...}}
 
-Rating criteria - think about WHO the campaign wants to reach, then evaluate each media:
-- "High": This media's audience strongly overlaps with the campaign's target (content topic, audience demographics, and context are highly relevant)
-- "Middle": Partial overlap - some audience segments match the target
-- "Low": Minimal overlap - audience is mostly different from the campaign's target
+Scoring approach - consider ALL of these factors together:
+1. CATEGORY FIT (40%): Is the media's category among the target categories? Higher category score = more relevant.
+2. DEMOGRAPHIC FIT (30%): Does the media's audience demographics (gender, age) match the target? Use the demographics field if available.
+3. CONTEXTUAL FIT (30%): Based on the media's description, would the campaign's target audience naturally visit this media?
 
-Consider:
-1. Does the media's content category match the campaign's product/service?
-2. Would the media's typical readers/visitors be interested in this campaign?
-3. Is the media's context appropriate for this brand/product?
-4. Use the media description to understand what the media is actually about.
+Distribution guide (IMPORTANT - follow this approximately):
+- "High": ~10-20% of media — strong match on category + demographics + context
+- "Middle": ~25-35% of media — moderate match on at least 2 factors
+- "Low": remaining ~50-60% — weak match overall
+
+Do NOT rate all media as Low. A campaign targeting women should rate Fashion & Beauty media as High even if the brief doesn't mention fashion explicitly.
 
 Rate ALL ${batch.length} media IDs.`;
     const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`,{
@@ -427,12 +436,13 @@ async function generatePlan(){
     let aiLabels=null;
     if(geminiApiKey&&aiUsed){
       lm.textContent=`Rating ${filtered.length} media with AI (this may take a moment)...`;
-      try{aiLabels=await labelMediaAI(brief,country,filtered);}
+      try{aiLabels=await labelMediaAI(brief,country,filtered,analysis);}
       catch(e){console.warn('Gemini labeling failed, using math fallback:',e);}
     }
     lm.textContent='Building results...';
     const OTR_PCT={High:75,Middle:37,Low:12};
-    allMedia=filtered.map(m=>{
+    // First pass: compute composite scores for all media
+    let scored=filtered.map(m=>{
       const catScore=scores[m.c]||0;
       const swDemo=typeof MEDIA_DEMOGRAPHICS!=='undefined'&&MEDIA_DEMOGRAPHICS[m.i];
       const catProfile=P[m.c]||P['General Lifestyle']||defaultProfile;
@@ -446,25 +456,39 @@ async function generatePlan(){
         else genderFit=(profile.male+profile.female)/2;
       }
       if(hasAgeTarget){ageFit=Object.keys(tAge).reduce((s,a)=>s+(profile.age[a]||0),0);}
-      // On-Target label: prefer AI, fallback to math
-      let onTargetLabel;
-      if(aiLabels&&aiLabels[m.i]){
-        onTargetLabel=aiLabels[m.i];
-        if(!['High','Middle','Low'].includes(onTargetLabel))onTargetLabel='Low';
-      }else{
-        let mathPct=100;
-        if(hasGenderTarget&&hasAgeTarget) mathPct=genderFit*ageFit/100;
-        else if(hasGenderTarget) mathPct=genderFit;
-        else if(hasAgeTarget) mathPct=ageFit;
-        onTargetLabel=mathPct>=50?'High':mathPct>=25?'Middle':'Low';
-      }
-      const onTargetPct=OTR_PCT[onTargetLabel];
-      const relevance=catScore+(onTargetLabel==='High'?3:onTargetLabel==='Middle'?1.5:0);
+      // Composite: category (40%) + gender (30%) + age (30%)
+      const catNorm=catScore/3*100; // normalize to 0-100
+      const compositeScore=catNorm*0.4+genderFit*0.3+(hasDemoTarget?ageFit*0.3:0)/(hasDemoTarget?1:0.3)*0.3;
       const si=typeof MEDIA_SITE_INFO!=='undefined'&&MEDIA_SITE_INFO[m.i]||null;
       const mvKnown=si&&si.mv?si.mv*(si.mvu==='M'?1000000:si.mvu==='k'?1000:1):0;
       const mvRaw=mvKnown||(mvBycat[m.c]||globalMin);
       const mvEstimated=!mvKnown;
-      return {...m,relevance,genderFit,ageFit,onTargetPct,onTargetLabel,profile,demoSrc,si,mvRaw,mvEstimated};
+      return {...m,compositeScore,genderFit,ageFit,profile,demoSrc,si,mvRaw,mvEstimated};
+    });
+    // Second pass: assign On-Target labels
+    if(aiLabels){
+      // Use AI labels, fallback to relative math for unlabeled
+      scored.forEach(m=>{
+        const ai=aiLabels[m.i];
+        if(ai&&['High','Middle','Low'].includes(ai)){m.onTargetLabel=ai;}
+      });
+      // For any unlabeled, use relative composite score
+      const unlabeled=scored.filter(m=>!m.onTargetLabel);
+      if(unlabeled.length){
+        const sorted=[...unlabeled].sort((a,b)=>b.compositeScore-a.compositeScore);
+        const h=Math.ceil(sorted.length*0.15),hm=Math.ceil(sorted.length*0.45);
+        sorted.forEach((m,i)=>{m.onTargetLabel=i<h?'High':i<hm?'Middle':'Low';});
+      }
+    }else{
+      // Pure relative scoring: top 15% High, next 30% Middle, rest Low
+      const sorted=[...scored].sort((a,b)=>b.compositeScore-a.compositeScore);
+      const h=Math.ceil(sorted.length*0.15),hm=Math.ceil(sorted.length*0.45);
+      sorted.forEach((m,i)=>{m.onTargetLabel=i<h?'High':i<hm?'Middle':'Low';});
+    }
+    allMedia=scored.map(m=>{
+      const onTargetPct=OTR_PCT[m.onTargetLabel];
+      const relevance=m.compositeScore;
+      return {...m,relevance,onTargetPct};
     }).sort((a,b)=>{const o={High:0,Middle:1,Low:2};return (o[a.onTargetLabel]-o[b.onTargetLabel])||b.relevance-a.relevance||a.n.localeCompare(b.n);});
     checkedIds=new Set();
     allMedia.forEach(m=>{if(m.onTargetLabel==='High'||m.onTargetLabel==='Middle')checkedIds.add(m.i);});
