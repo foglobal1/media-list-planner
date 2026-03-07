@@ -76,6 +76,10 @@ tr.unchecked td{opacity:.45}
 .filter-bar input{width:200px}
 .count-badge{background:#aa0000;color:#fff;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
 .count-badge.green{background:#2ec4b6}
+.otr-info-btn{cursor:pointer;opacity:.5;font-size:13px;margin-left:3px;display:inline-block;vertical-align:middle}
+.otr-info-btn:hover{opacity:.8}
+#otrPopover{display:none;position:fixed;background:#fff;color:#222;padding:20px 24px;border-radius:12px;font-size:14px;line-height:2;white-space:nowrap;z-index:99999;box-shadow:0 12px 40px rgba(0,0,0,.3);text-align:left;border:1px solid #ccc}
+#otrPopover strong{font-size:16px;color:#0f3460;display:block;margin-bottom:6px}
 .selection-bar{background:#1a1a2e;color:#fff;padding:12px 20px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
 .selection-bar .sel-info{font-size:13px}
 .selection-bar .sel-info strong{color:#2ec4b6;font-size:16px}
@@ -140,9 +144,15 @@ input[type=checkbox]{width:16px;height:16px;cursor:pointer;accent-color:#aa0000}
   <div class="results" id="results">
     <div class="selection-bar" id="selectionBar">
       <div class="sel-info">Selected: <strong id="selCount">0</strong> / <span id="selTotal">0</span> media</div>
-      <div style="display:flex;gap:8px;align-items:center">
-        <span style="font-size:12px;opacity:.7">Est. Reachable Audience:</span>
-        <strong id="selReach" style="color:#2ec4b6;font-size:18px">0</strong>
+      <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+        <div style="display:flex;gap:6px;align-items:center">
+          <span style="font-size:12px;opacity:.7">Est. Reachable Audience:</span>
+          <strong id="selReach" style="color:#2ec4b6;font-size:18px">0</strong>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span style="font-size:12px;opacity:.7">On-Target Reachable:</span>
+          <strong id="selOnTargetReach" style="color:#ffa502;font-size:18px">0</strong>
+        </div>
         <span style="font-size:12px;opacity:.7">(<span id="selReachPct">0</span>% of population)</span>
       </div>
     </div>
@@ -156,7 +166,8 @@ input[type=checkbox]{width:16px;height:16px;cursor:pointer;accent-color:#aa0000}
         <span style="flex:1"></span>
         <button class="btn btn-sm" style="background:#e8eaf6;color:#3f51b5" onclick="selectAll()">Select All</button>
         <button class="btn btn-sm" style="background:#e8eaf6;color:#3f51b5" onclick="selectNone()">Deselect All</button>
-        <button class="btn btn-sm" style="background:#c8e6c9;color:#2e7d32" onclick="selectPrimary()">Select Primary Only</button>
+        <button class="btn btn-sm" style="background:#c8e6c9;color:#2e7d32" onclick="selectByOTR('High')">Select On-Target Ratio High Only</button>
+        <button class="btn btn-sm" style="background:#fff3e0;color:#e65100" onclick="selectByOTR('HighMiddle')">Select On-Target Ratio High &amp; Middle</button>
       </div>
       <div class="filter-bar">
         <input type="text" id="searchMedia" placeholder="Search media name..." oninput="filterTable()">
@@ -172,6 +183,10 @@ input[type=checkbox]{width:16px;height:16px;cursor:pointer;accent-color:#aa0000}
           <option value="13-17">Top Age: 13-17</option><option value="18-24">Top Age: 18-24</option>
           <option value="25-34">Top Age: 25-34</option><option value="35-44">Top Age: 35-44</option>
           <option value="45-54">Top Age: 45-54</option><option value="55+">Top Age: 55+</option>
+        </select>
+        <select id="filterOTR" onchange="filterTable()">
+          <option value="">On-Target: All</option>
+          <option value="High">High</option><option value="Middle">Middle</option><option value="Low">Low</option>
         </select>
       </div>
       <div class="table-scroll">
@@ -363,8 +378,14 @@ async function generatePlan(){
       if(hasAgeTarget){ageFit=Object.keys(tAge).reduce((s,a)=>s+(profile.age[a]||0),0);}
       const demoScore=hasDemoTarget?((hasGenderTarget?genderFit/50:1)+(hasAgeTarget?ageFit/25:1)):0;
       const relevance=catScore+demoScore;
-      return {...m,relevance,genderFit,ageFit,profile,demoSrc};
-    }).sort((a,b)=>b.relevance-a.relevance||a.n.localeCompare(b.n));
+      // On-Target Ratio: % of audience matching brief's target demo
+      let onTargetPct=100;
+      if(hasGenderTarget&&hasAgeTarget) onTargetPct=genderFit*ageFit/100;
+      else if(hasGenderTarget) onTargetPct=genderFit;
+      else if(hasAgeTarget) onTargetPct=ageFit;
+      const onTargetLabel=onTargetPct>=50?'High':onTargetPct>=25?'Middle':'Low';
+      return {...m,relevance,genderFit,ageFit,onTargetPct,onTargetLabel,profile,demoSrc};
+    }).sort((a,b)=>b.onTargetPct-a.onTargetPct||b.relevance-a.relevance||a.n.localeCompare(b.n));
     checkedIds=new Set();
     allMedia.forEach(m=>{if(m.relevance>0)checkedIds.add(m.i);});
     currentResult={country,meta,brief,scores,matchedCats};
@@ -397,6 +418,8 @@ function getFilteredMedia(){
     else if(gender==='female50')f=f.filter(m=>m.profile.female>=50);
   }
   if(ageTop)f=f.filter(m=>{const p=m.profile.age;return AG.reduce((a,b)=>p[a]>p[b]?a:b)===ageTop;});
+  const otr=document.getElementById('filterOTR')?.value||'';
+  if(otr)f=f.filter(m=>m.onTargetLabel===otr);
   // Sort
   const sorted=[...f].sort((a,b)=>{
     let va,vb;
@@ -407,7 +430,7 @@ function getFilteredMedia(){
     else if(sortCol==='platform'){va=a.f;vb=b.f;}
     else if(sortCol==='male'){va=pa.male;vb=pb.male;}
     else if(sortCol==='female'){va=pa.female;vb=pb.female;}
-    else if(sortCol==='relevance'){va=a.relevance;vb=b.relevance;}
+    else if(sortCol==='relevance'||sortCol==='ontarget'){va=a.onTargetPct;vb=b.onTargetPct;}
     else if(sortCol==='source'){va=a.demoSrc;vb=b.demoSrc;}
     else if(sortCol==='id'){va=a.i;vb=b.i;}
     else if(AG.includes(sortCol)){va=pa.age[sortCol];vb=pb.age[sortCol];}
@@ -441,11 +464,12 @@ function renderTable(media){
     '<th style="cursor:default"><input type="checkbox" id="checkAll" onchange="toggleAllVisible(this.checked)"></th>'+
     '<th style="cursor:default">#</th>'+
     sh('ID','id','text-right')+sh('Media Name','name','')+sh('Media Partner','partner','')+
-    sh('Category','category','')+sh('Platform','platform','')+
+    sh('Category','category','')+
+    `<th onclick="doSort('ontarget')">On-Target <span class="otr-info-btn" onclick="event.stopPropagation();showOtrInfo(this)">&#x24D8;</span><span class="sa">${sa('ontarget')}</span></th>`+
+    sh('Platform','platform','')+
     sh('Male%','male','text-right')+sh('Female%','female','text-right')+
     AG.map(g=>sh(g,g,'text-right age-col')).join('')+
-    sh('Source','source','')+
-    sh('Relevance','relevance','text-right');
+    sh('Source','source','');
   document.getElementById('tableBody').innerHTML=media.map((m,i)=>{
     const p=m.profile;
     const checked=checkedIds.has(m.i);
@@ -457,12 +481,12 @@ function renderTable(media){
       <td><a href="${m.u||'#'}" target="_blank" style="color:#0f3460;text-decoration:none;font-weight:500">${m.n}</a></td>
       <td style="font-size:11px;color:#888;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${m.p}</td>
       <td><span class="cat-badge">${m.c}</span></td>
+      <td><span style="padding:2px 8px;border-radius:3px;font-size:11px;font-weight:600;background:${m.onTargetLabel==='High'?'#c8e6c9;color:#2e7d32':m.onTargetLabel==='Middle'?'#fff3e0;color:#e65100':'#ffebee;color:#c62828'}">${m.onTargetLabel}</span></td>
       <td><span class="platform-badge">${m.f}</span></td>
       <td class="text-right">${p.male}%</td>
       <td class="text-right">${p.female}%</td>
       ${AG.map(g=>`<td class="text-right" style="font-size:11px;${g===topAgeG?'font-weight:700;color:#aa0000':''}">${p.age[g]}%</td>`).join('')}
       <td style="font-size:10px;"><span style="padding:2px 6px;border-radius:3px;background:${m.demoSrc==='SimilarWeb'?'#e3f2fd;color:#1565c0':'#f5f5f5;color:#999'}">${m.demoSrc}</span></td>
-      <td class="text-right" style="font-weight:600;color:${m.relevance>0?'#2e7d32':'#ccc'}">${m.relevance>0?m.relevance.toFixed(1):'-'}</td>
     </tr>`;
   }).join('');
   document.getElementById('tableSubtitle').textContent=`${media.length} media shown / ${allMedia.length} total for ${currentResult.country}`;
@@ -488,7 +512,7 @@ function toggleAllVisible(checked){
 
 function selectAll(){checkedIds=new Set(allMedia.map(m=>m.i));renderTable(getFilteredMedia());updateInsights();}
 function selectNone(){checkedIds.clear();renderTable(getFilteredMedia());updateInsights();}
-function selectPrimary(){checkedIds=new Set(allMedia.filter(m=>m.relevance>0).map(m=>m.i));renderTable(getFilteredMedia());updateInsights();}
+function selectByOTR(level){checkedIds=new Set(allMedia.filter(m=>level==='HighMiddle'?(m.onTargetLabel==='High'||m.onTargetLabel==='Middle'):m.onTargetLabel===level).map(m=>m.i));renderTable(getFilteredMedia());updateInsights();}
 
 function filterTable(){renderTable(getFilteredMedia());}
 
@@ -511,11 +535,14 @@ function updateInsights(){
   
   const uniqueReach=Math.min(Math.round(sel.length*meta.digitalPop*0.015),meta.digitalPop);
   const reachPct=(uniqueReach/meta.population*100);
+  const avgOnTarget=sel.length?sel.reduce((s,m)=>s+m.onTargetPct,0)/sel.length:0;
+  const onTargetReach=Math.round(uniqueReach*avgOnTarget/100);
   
   // Update selection bar
   document.getElementById('selCount').textContent=sel.length;
   document.getElementById('selTotal').textContent=allMedia.length;
   document.getElementById('selReach').textContent=fmt(uniqueReach);
+  document.getElementById('selOnTargetReach').textContent=fmt(onTargetReach);
   document.getElementById('selReachPct').textContent=reachPct.toFixed(1);
   
   // Summary cards
@@ -524,13 +551,14 @@ function updateInsights(){
     {l:'Population',v:fmt(meta.population)},
     {l:'Digital Population',v:fmt(meta.digitalPop)},
     {l:'Est. Reachable Audience',v:fmt(uniqueReach),hl:true},
+    {l:'On-Target Reachable Audience',v:fmt(onTargetReach),hl:true},
     {l:'Reach % of Population',v:reachPct.toFixed(1)+'%',hl:true},
     {l:'Selected Media',v:sel.length+' / '+allMedia.length},
     {l:'Categories',v:Object.keys(catCount).length}
   ].map(x=>`<div class="card${x.hl?' highlight':''}"><div class="card-label">${x.l}</div><div class="card-value${x.c?' '+x.c:''}">${x.v}</div></div>`).join('');
   
   // Store for CSV
-  currentResult.w=w; currentResult.catCount=catCount; currentResult.uniqueReach=uniqueReach; currentResult.reachPct=reachPct; currentResult.selMedia=sel;
+  currentResult.w=w; currentResult.catCount=catCount; currentResult.uniqueReach=uniqueReach; currentResult.onTargetReach=onTargetReach; currentResult.reachPct=reachPct; currentResult.selMedia=sel;
   
   // Charts
   renderCharts(w,catCount,meta,bl);
@@ -600,11 +628,11 @@ async function downloadChart(btn){
 
 function downloadCSV(){
   if(!currentResult)return;const r=currentResult;const sel=r.selMedia||[];
-  const rows=[['#','Media ID','Media Name','Media Partner','Category','Platform','URL','Male%','Female%',...AG.map(g=>'Age '+g+' %'),'Data Source','Relevance','Selected']];
+  const rows=[['#','Media ID','Media Name','Media Partner','Category','Platform','URL','Male%','Female%',...AG.map(g=>'Age '+g+' %'),'Data Source','On-Target Ratio','On-Target %','Selected']];
   allMedia.forEach((m,i)=>{const p=m.profile;const ck=checkedIds.has(m.i)?'Yes':'No';
-    rows.push([i+1,m.i,`"${m.n}"`,`"${m.p}"`,m.c,m.f,m.u||'',p.male,p.female,...AG.map(g=>p.age[g]),m.demoSrc||'Estimated',m.relevance>0?m.relevance.toFixed(1):'-',ck]);});
+    rows.push([i+1,m.i,`"${m.n}"`,`"${m.p}"`,m.c,m.f,m.u||'',p.male,p.female,...AG.map(g=>p.age[g]),m.demoSrc||'Estimated',m.onTargetLabel||'-',m.onTargetPct?m.onTargetPct.toFixed(1)+'%':'-',ck]);});
   rows.push([]);rows.push(['=== Audience Insight (Selected Media Only) ===']);
-  rows.push(['Country',r.country]);rows.push(['Selected Media',sel.length]);rows.push(['Est. Reachable Audience',r.uniqueReach]);rows.push(['Reach %',r.reachPct.toFixed(1)+'%']);
+  rows.push(['Country',r.country]);rows.push(['Selected Media',sel.length]);rows.push(['Est. Reachable Audience',r.uniqueReach]);rows.push(['On-Target Reachable Audience',r.onTargetReach]);rows.push(['Reach %',r.reachPct.toFixed(1)+'%']);
   rows.push([]);rows.push(['Gender','Male',r.w.male.toFixed(1)+'%','Female',r.w.female.toFixed(1)+'%']);
   rows.push([]);rows.push(['Age Group','%']);AG.forEach(g=>rows.push([g,r.w['a_'+g].toFixed(1)+'%']));
   rows.push([]);rows.push(['Income','%']);IK.forEach(k=>rows.push([k,r.w['i_'+k].toFixed(1)+'%']));
@@ -616,11 +644,11 @@ function downloadCSV(){
 
 function downloadCSVJP(){
   if(!currentResult)return;const r=currentResult;const sel=r.selMedia||[];
-  const rows=[['#','メディアID','メディア名','メディアパートナー','カテゴリ','プラットフォーム','URL','男性%','女性%',...AG.map(g=>g+'歳 %'),'データソース','関連度','選択']];
+  const rows=[['#','メディアID','メディア名','メディアパートナー','カテゴリ','プラットフォーム','URL','男性%','女性%',...AG.map(g=>g+'歳 %'),'データソース','On-Target Ratio','On-Target %','選択']];
   allMedia.forEach((m,i)=>{const p=m.profile;const ck=checkedIds.has(m.i)?'Yes':'No';
-    rows.push([i+1,m.i,`"${m.n}"`,`"${m.p}"`,m.c,m.f,m.u||'',p.male,p.female,...AG.map(g=>p.age[g]),m.demoSrc||'Estimated',m.relevance>0?m.relevance.toFixed(1):'-',ck]);});
+    rows.push([i+1,m.i,`"${m.n}"`,`"${m.p}"`,m.c,m.f,m.u||'',p.male,p.female,...AG.map(g=>p.age[g]),m.demoSrc||'Estimated',m.onTargetLabel||'-',m.onTargetPct?m.onTargetPct.toFixed(1)+'%':'-',ck]);});
   rows.push([]);rows.push(['=== オーディエンスインサイト（選択メディアのみ） ===']);
-  rows.push(['国',r.country]);rows.push(['選択メディア数',sel.length]);rows.push(['推定リーチ可能オーディエンス',r.uniqueReach]);rows.push(['人口リーチ率',r.reachPct.toFixed(1)+'%']);
+  rows.push(['国',r.country]);rows.push(['選択メディア数',sel.length]);rows.push(['推定リーチ可能オーディエンス',r.uniqueReach]);rows.push(['On-Targetリーチ可能オーディエンス',r.onTargetReach]);rows.push(['人口リーチ率',r.reachPct.toFixed(1)+'%']);
   rows.push([]);rows.push(['性別','男性',r.w.male.toFixed(1)+'%','女性',r.w.female.toFixed(1)+'%']);
   rows.push([]);rows.push(['年齢層','割合']);AG.forEach(g=>rows.push([g,r.w['a_'+g].toFixed(1)+'%']));
   rows.push([]);rows.push(['収入','割合']);IK.forEach(k=>rows.push([k,r.w['i_'+k].toFixed(1)+'%']));
@@ -632,6 +660,20 @@ function downloadCSVJP(){
 
 function dl(c,f){const b=new Blob([c],{type:'text/csv;charset=utf-8;'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=f;a.click();URL.revokeObjectURL(a.href);}
 function fmt(n){return Number(n).toLocaleString('en-US');}
+function showOtrInfo(el){
+  let pop=document.getElementById('otrPopover');
+  if(!pop){
+    pop=document.createElement('div');pop.id='otrPopover';
+    pop.innerHTML='<strong>On-Target Ratio</strong>% of audience matching the campaign brief target.<br><br><span style="color:#2e7d32;font-weight:600">● High:</span> ≥ 50% on-target<br><span style="color:#e65100;font-weight:600">● Middle:</span> 25–50% on-target<br><span style="color:#c62828;font-weight:600">● Low:</span> &lt; 25% on-target';
+    document.body.appendChild(pop);
+    document.addEventListener('click',function(){pop.style.display='none';});
+  }
+  if(pop.style.display==='block'){pop.style.display='none';return;}
+  const r=el.getBoundingClientRect();
+  pop.style.left=(r.left)+'px';
+  pop.style.top=(r.bottom+8)+'px';
+  pop.style.display='block';
+}
 function resetApp(){charts.forEach(c=>c.destroy());charts=[];currentResult=null;allMedia=[];checkedIds.clear();document.getElementById('results').style.display='none';document.getElementById('detectedCategories').innerHTML='';document.getElementById('briefInput').value='';document.getElementById('searchMedia')&&(document.getElementById('searchMedia').value='');}
 </script>
 </body>
