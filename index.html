@@ -153,7 +153,7 @@ input[type=checkbox]{width:16px;height:16px;cursor:pointer;accent-color:#aa0000}
           <span style="font-size:12px;opacity:.7">On-Target Reachable:</span>
           <strong id="selOnTargetReach" style="color:#ffa502;font-size:18px">0</strong>
         </div>
-        <span style="font-size:12px;opacity:.7">(<span id="selReachPct">0</span>% of population)</span>
+        <span style="font-size:12px;opacity:.7">(<span id="selReachPct">0</span>% of target demo)</span>
       </div>
     </div>
     <div class="summary-cards" id="summaryCards"></div>
@@ -440,7 +440,18 @@ async function generatePlan(){
       catch(e){console.warn('Gemini labeling failed, using math fallback:',e);}
     }
     lm.textContent='Building results...';
-    const OTR_PCT={High:75,Middle:37,Low:12};
+    // Calculate target demographic population from baselines
+    const bl=cfg.baseline;
+    let targetGenderPct=1.0;
+    if(Object.keys(tGender).length===1){
+      if(tGender.female) targetGenderPct=bl.female/100;
+      else if(tGender.male) targetGenderPct=bl.male/100;
+    }
+    let targetAgePct=1.0;
+    if(Object.keys(tAge).length>0){
+      targetAgePct=Object.keys(tAge).reduce((s,a)=>s+(bl.age[a]||0),0)/100;
+    }
+    const targetDemoPop=Math.round(meta.population*targetGenderPct*targetAgePct);
     // First pass: compute composite scores for all media
     let scored=filtered.map(m=>{
       const catScore=scores[m.c]||0;
@@ -459,11 +470,21 @@ async function generatePlan(){
       // Composite: category (40%) + gender (30%) + age (30%)
       const catNorm=catScore/3*100; // normalize to 0-100
       const compositeScore=catNorm*0.4+genderFit*0.3+(hasDemoTarget?ageFit*0.3:0)/(hasDemoTarget?1:0.3)*0.3;
+      // Compute actual on-target % from media's demographic profile
+      let mediaOTPct=1.0;
+      if(hasGenderTarget){
+        const gKeys=Object.keys(tGender);
+        if(gKeys.length===1&&gKeys[0]==='female') mediaOTPct*=profile.female/100;
+        else if(gKeys.length===1&&gKeys[0]==='male') mediaOTPct*=profile.male/100;
+      }
+      if(hasAgeTarget){
+        mediaOTPct*=Object.keys(tAge).reduce((s,a)=>s+(profile.age[a]||0),0)/100;
+      }
       const si=typeof MEDIA_SITE_INFO!=='undefined'&&MEDIA_SITE_INFO[m.i]||null;
       const mvKnown=si&&si.mv?si.mv*(si.mvu==='M'?1000000:si.mvu==='k'?1000:1):0;
       const mvRaw=mvKnown||(mvBycat[m.c]||globalMin);
       const mvEstimated=!mvKnown;
-      return {...m,compositeScore,genderFit,ageFit,profile,demoSrc,si,mvRaw,mvEstimated};
+      return {...m,compositeScore,genderFit,ageFit,profile,demoSrc,si,mvRaw,mvEstimated,mediaOTPct};
     });
     // Second pass: assign On-Target labels
     if(aiLabels){
@@ -486,7 +507,7 @@ async function generatePlan(){
       sorted.forEach((m,i)=>{m.onTargetLabel=i<h?'High':i<hm?'Middle':'Low';});
     }
     allMedia=scored.map(m=>{
-      const onTargetPct=OTR_PCT[m.onTargetLabel];
+      const onTargetPct=m.mediaOTPct*100; // actual demographic-based on-target %
       const relevance=m.compositeScore;
       return {...m,relevance,onTargetPct};
     }).sort((a,b)=>{
@@ -498,7 +519,7 @@ async function generatePlan(){
     });
     checkedIds=new Set();
     allMedia.forEach(m=>{if(m.onTargetLabel==='High'||m.onTargetLabel==='Middle')checkedIds.add(m.i);});
-    currentResult={country,meta,brief,scores,matchedCats};
+    currentResult={country,meta,brief,scores,matchedCats,targetDemoPop,tGender,tAge};
     renderAll();
   }catch(e){console.error('generatePlan error:',e);alert('Error: '+e.message);}
   finally{document.getElementById('loading').style.display='none';}
@@ -648,47 +669,55 @@ function updateInsights(){
   
   // Reach calculation: incremental unique reach with diminishing returns
   // Sort by traffic desc, add each media's marginal contribution
+  // Monthly visits → unique visitors: divide by ppv (page views/visit) and visit frequency (~2.5 visits/month)
+  const VISIT_FREQ=2.5;
   const selSorted=[...sel].sort((a,b)=>b.mvRaw-a.mvRaw);
   let cumReach=0;
   selSorted.forEach(m=>{
     const ppv=m.si&&m.si.ppv>1?m.si.ppv:1.5;
-    const uv=m.mvRaw/ppv; // estimated unique visitors
-    // Each additional media has diminishing marginal reach (audience overlap increases)
-    const marginal=uv*Math.max(0.05,1-cumReach/meta.population);
+    const uv=m.mvRaw/ppv/VISIT_FREQ; // estimated monthly unique visitors
+    const marginal=uv*Math.max(0.02,Math.pow(1-cumReach/meta.population,1.5));
     cumReach+=marginal;
   });
   const uniqueReach=Math.min(Math.round(cumReach),meta.population);
   const reachPct=(uniqueReach/meta.population*100);
-  // On-Target: same incremental approach weighted by on-target %
+  // On-Target: use actual demographic % per media, cap at target demographic population
+  // Label-based contextual weight: High media are contextually relevant,
+  // Middle moderately so, Low minimally
+  const OT_CONTEXT_WEIGHT={High:1.0,Middle:0.5,Low:0.15};
+  const targetDemoPop=r.targetDemoPop||meta.population;
   let cumOTReach=0;
   selSorted.forEach(m=>{
     const ppv=m.si&&m.si.ppv>1?m.si.ppv:1.5;
-    const uv=m.mvRaw/ppv*m.onTargetPct/100;
-    const marginal=uv*Math.max(0.05,1-cumOTReach/(meta.population*0.5));
+    const ctxW=OT_CONTEXT_WEIGHT[m.onTargetLabel]||0.15;
+    const uv=m.mvRaw/ppv/VISIT_FREQ*(m.onTargetPct/100)*ctxW;
+    const marginal=uv*Math.max(0.02,Math.pow(1-cumOTReach/targetDemoPop,1.5));
     cumOTReach+=marginal;
   });
-  const onTargetReach=Math.min(Math.round(cumOTReach),uniqueReach);
-  
+  const onTargetReach=Math.min(Math.round(cumOTReach),targetDemoPop,uniqueReach);
+  const otReachPct=targetDemoPop>0?(onTargetReach/targetDemoPop*100):0;
+
   // Update selection bar
   document.getElementById('selCount').textContent=sel.length;
   document.getElementById('selTotal').textContent=allMedia.length;
   document.getElementById('selReach').textContent=fmt(uniqueReach);
   document.getElementById('selOnTargetReach').textContent=fmt(onTargetReach);
-  document.getElementById('selReachPct').textContent=reachPct.toFixed(1);
-  
+  document.getElementById('selReachPct').textContent=otReachPct.toFixed(1);
+
   // Summary cards
   document.getElementById('summaryCards').innerHTML=[
     {l:'Country',v:r.country,c:'small'},
     {l:'Population',v:fmt(meta.population)},
+    {l:'Target Demo Population',v:fmt(targetDemoPop),hl:true},
     {l:'Est. Reachable Audience',v:fmt(uniqueReach),hl:true},
     {l:'On-Target Reachable Audience',v:fmt(onTargetReach),hl:true},
-    {l:'Reach % of Population',v:reachPct.toFixed(1)+'%',hl:true},
+    {l:'On-Target Reach %',v:otReachPct.toFixed(1)+'% of target demo',hl:true},
     {l:'Selected Media',v:sel.length+' / '+allMedia.length},
     {l:'Categories',v:Object.keys(catCount).length}
   ].map(x=>`<div class="card${x.hl?' highlight':''}"><div class="card-label">${x.l}</div><div class="card-value${x.c?' '+x.c:''}">${x.v}</div></div>`).join('');
   
   // Store for CSV
-  currentResult.w=w; currentResult.catCount=catCount; currentResult.uniqueReach=uniqueReach; currentResult.onTargetReach=onTargetReach; currentResult.reachPct=reachPct; currentResult.selMedia=sel;
+  currentResult.w=w; currentResult.catCount=catCount; currentResult.uniqueReach=uniqueReach; currentResult.onTargetReach=onTargetReach; currentResult.reachPct=reachPct; currentResult.otReachPct=otReachPct; currentResult.selMedia=sel;
   
   // Charts
   renderCharts(w,catCount,meta,bl);
