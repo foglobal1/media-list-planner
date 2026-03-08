@@ -669,32 +669,37 @@ function updateInsights(){
   
   // Reach calculation: incremental unique reach with diminishing returns
   // Sort by traffic desc, add each media's marginal contribution
-  // Monthly visits → unique visitors: divide by ppv (page views/visit) and visit frequency (~2.5 visits/month)
+  // Monthly visits → unique visitors: divide by ppv and visit frequency
   const VISIT_FREQ=2.5;
   const selSorted=[...sel].sort((a,b)=>b.mvRaw-a.mvRaw);
   let cumReach=0;
   selSorted.forEach(m=>{
+    if(cumReach>=meta.population)return;
     const ppv=m.si&&m.si.ppv>1?m.si.ppv:1.5;
-    const uv=m.mvRaw/ppv/VISIT_FREQ; // estimated monthly unique visitors
-    const marginal=uv*Math.max(0.02,Math.pow(1-cumReach/meta.population,1.5));
+    const uv=m.mvRaw/ppv/VISIT_FREQ;
+    const saturation=Math.max(0,1-cumReach/meta.population);
+    const marginal=uv*Math.pow(saturation,3);
     cumReach+=marginal;
   });
   const uniqueReach=Math.min(Math.round(cumReach),meta.population);
   const reachPct=(uniqueReach/meta.population*100);
-  // On-Target: use actual demographic % per media, cap at target demographic population
-  // Label-based contextual weight: High media are contextually relevant,
-  // Middle moderately so, Low minimally
+  // On-Target: actual demographic % per media, capped at target demographic population
+  // Contextual weight: High media contribute more on-target reach
+  // Max reachable: ~60% of target demo (industry standard ceiling for digital campaigns)
   const OT_CONTEXT_WEIGHT={High:1.0,Middle:0.5,Low:0.15};
   const targetDemoPop=r.targetDemoPop||meta.population;
+  const maxReachable=Math.round(targetDemoPop*0.6);
   let cumOTReach=0;
   selSorted.forEach(m=>{
+    if(cumOTReach>=maxReachable)return;
     const ppv=m.si&&m.si.ppv>1?m.si.ppv:1.5;
     const ctxW=OT_CONTEXT_WEIGHT[m.onTargetLabel]||0.15;
     const uv=m.mvRaw/ppv/VISIT_FREQ*(m.onTargetPct/100)*ctxW;
-    const marginal=uv*Math.max(0.02,Math.pow(1-cumOTReach/targetDemoPop,1.5));
+    const saturation=Math.max(0,1-cumOTReach/maxReachable);
+    const marginal=uv*Math.pow(saturation,3);
     cumOTReach+=marginal;
   });
-  const onTargetReach=Math.min(Math.round(cumOTReach),targetDemoPop,uniqueReach);
+  const onTargetReach=Math.min(Math.round(cumOTReach),maxReachable,uniqueReach);
   const otReachPct=targetDemoPop>0?(onTargetReach/targetDemoPop*100):0;
 
   // Update selection bar
